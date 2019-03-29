@@ -120,10 +120,11 @@ struct interval {
 };
 
 struct bitmap_helper {
+    //std::shared_ptr< std::vector<interval> > intervals;
     std::vector<interval> intervals;
 };
 
-/*------ Functions --------*/
+/*------ Function pointers --------*/
 
 typedef bool(*overlap_func)(const uint32_t, const ssize_t, const interval*);
 typedef bool(*overlap_func_ordered)(const uint32_t, const ssize_t, const interval*, const interval*&);
@@ -393,7 +394,10 @@ bool overlap_avx2(const uint32_t query, const ssize_t n, const interval* ranges)
 bool overlap_avx2(const uint32_t query, const ssize_t n, const interval* ranges) { return 0; }
 #endif
 
-bool overlap_ekg_itree(IntervalTree<uint32_t,uint32_t>& itree, std::vector< Interval<uint32_t,uint32_t> >& results, const uint32_t query, const ssize_t n, const interval* ranges) {
+bool overlap_ekg_itree(IntervalTree<uint32_t,uint32_t>& itree, std::vector< Interval<uint32_t,uint32_t> >& results, 
+                       const uint32_t query, 
+                       const ssize_t n, const interval* ranges) 
+{
     uint32_t overlaps = 0;
     itree.findOverlapping(query, query, results);
     overlaps += results.size();
@@ -590,7 +594,7 @@ bool overlap_scalar_binary_firstmatch(const uint32_t query, const ssize_t n, con
         if(ranges[mid].right <= query) from = mid + 1;
         else if(ranges[mid].left >= query) to = mid - 1;
         else {
-            hit = &ranges[2*mid];
+            hit = &ranges[mid];
             return true;
         }
 
@@ -599,7 +603,7 @@ bool overlap_scalar_binary_firstmatch(const uint32_t query, const ssize_t n, con
 
     for (int i = from; i <= to; ++i) {
         if (query < ranges[i].right && query > ranges[i].left) {
-            hit = &ranges[2*i];
+            hit = &ranges[i];
             return true;
         }
     }
@@ -674,7 +678,11 @@ bool debug_bench() {
     return true;
 }
 
-uint64_t wrapper(overlap_func f, ssize_t n_queries, uint32_t* __restrict__ queries, ssize_t n_ranges, const interval* __restrict__ ranges, uint64_t& timing) {
+uint64_t wrapper(overlap_func f, 
+                 ssize_t n_queries, uint32_t* queries, 
+                 ssize_t n_ranges, const interval* ranges, 
+                 uint64_t& timing) 
+{
     // Start timer.
     clockdef t1 = hclock::now();
 
@@ -694,7 +702,7 @@ uint64_t wrapper(overlap_func f, ssize_t n_queries, uint32_t* __restrict__ queri
     return n_overlaps;
 }
 
-uint64_t wrapper_tree(ssize_t n_queries, uint32_t* __restrict__ queries, ssize_t n_ranges, const interval* __restrict__ ranges, uint64_t& timing) {
+uint64_t wrapper_tree(ssize_t n_queries, uint32_t* queries, ssize_t n_ranges, const interval* ranges, uint64_t& timing) {
     // Construction phase -- do not add this to timer
     std::vector< Interval<uint32_t,uint32_t> > intervals;
     intervals.resize(n_ranges); // stupid because intervaltree corrupts data
@@ -731,8 +739,8 @@ uint64_t wrapper_tree(ssize_t n_queries, uint32_t* __restrict__ queries, ssize_t
 }
 
 uint64_t wrapper_listsquash(overlap_func_squash f, 
-                            ssize_t n_queries, uint32_t* __restrict__ queries, 
-                            ssize_t n_ranges, const interval* __restrict__ ranges,
+                            ssize_t n_queries, uint32_t* queries, 
+                            ssize_t n_ranges, const interval* ranges,
                             uint64_t* bitmaps, const uint32_t n_bitmaps, 
                             const uint32_t bin_size, 
                             const std::vector<bitmap_helper>& bitmap_data,
@@ -758,8 +766,8 @@ uint64_t wrapper_listsquash(overlap_func_squash f,
 }
 
 uint64_t wrapper_sorted(overlap_func_ordered f, 
-                        ssize_t n_queries, uint32_t* __restrict__ queries, 
-                        ssize_t n_ranges, const interval* __restrict__ ranges, 
+                        ssize_t n_queries, uint32_t* queries, 
+                        ssize_t n_ranges, const interval* ranges, 
                         uint64_t& timing) 
 {
     // Start timer.
@@ -930,19 +938,29 @@ bool bench() {
 
             if (n_ranges[r] <= 8192) {
                 uint64_t n_scalar_nosimd = wrapper(&overlap_scalar_nosimd, n_queries, queries, n_ranges_pairs, ivals, timings[0]);
-                uint64_t n_simd = wrapper(&overlap_simd, n_queries, queries, n_ranges_pairs, ivals, timings[3]);
+                uint64_t n_scalar = wrapper(&overlap_scalar, n_queries, queries, n_ranges_pairs, ivals, timings[1]);
+                uint64_t n_scalar_break = wrapper(&overlap_scalar_break, n_queries, queries, n_ranges_pairs, ivals, timings[2]);
+#if SIMD_VERSION >= 5
                 uint64_t n_avx2 = wrapper(&overlap_avx2, n_queries, queries, n_ranges_pairs, ivals, timings[4]);
-                uint64_t n_simd_add = wrapper(&overlap_simd_add, n_queries, queries, n_ranges_pairs, ivals, timings[5]);
+#else
+                uint64_t n_avx2 = 0;
+#endif
+#if SIMD_VERSION >= 3
+                uint64_t n_simd      = wrapper(&overlap_simd, n_queries, queries, n_ranges_pairs, ivals, timings[3]);
+                uint64_t n_simd_add  = wrapper(&overlap_simd_add, n_queries, queries, n_ranges_pairs, ivals, timings[5]);
                 uint64_t n_simd_add2 = wrapper(&overlap_simd_add_unroll2, n_queries, queries, n_ranges_pairs, ivals, timings[6]);
                 uint64_t n_simd_add4 = wrapper(&overlap_simd_add_unroll4, n_queries, queries, n_ranges_pairs, ivals, timings[7]);
-                uint64_t n_scalar = wrapper(&overlap_scalar, n_queries, queries, n_ranges_pairs, ivals, timings[8]);
-                uint64_t n_scalar_break = wrapper(&overlap_scalar_break, n_queries, queries, n_ranges_pairs, ivals, timings[9]);
+#else
+                uint64_t n_simd      = 0;
+                uint64_t n_simd_add  = 0;
+                uint64_t n_simd_add2 = 0;
+                uint64_t n_simd_add4 = 0;
+#endif
                 std::cerr << "done cycle " << c << " -> " << n_scalar_nosimd << " " << n_simd << "," << n_avx2 << "," << n_simd_add << "," << n_simd_add2 << "," << n_simd_add4 << "," << n_scalar << "," << n_scalar_break << std::endl;
             }
             
-            uint64_t n_binary = wrapper(&overlap_scalar_binary, n_queries, queries, n_ranges_pairs, ivals, timings[1]);
-            uint64_t n_simd_binary = wrapper(&overlap_simd_add_binary, n_queries, queries, n_ranges_pairs, ivals, timings[2]);
-            std::cerr << "before ekg tree" << std::endl;
+            uint64_t n_binary = wrapper(&overlap_scalar_binary, n_queries, queries, n_ranges_pairs, ivals, timings[8]);
+            uint64_t n_simd_binary = wrapper(&overlap_simd_add_binary, n_queries, queries, n_ranges_pairs, ivals, timings[9]);
             uint64_t n_ekg_tree = wrapper_tree(n_queries, queries, n_ranges_pairs, ivals, timings[10]);
             //uint64_t n_ekg_tree = 0;
             std::cerr << "BINARY=" << n_binary << " and " << n_simd_binary << " EKG=" << n_ekg_tree << std::endl;
@@ -958,12 +976,12 @@ bool bench() {
 
             assert(n_squash == n_binary);
 
-            std::cerr << "method=" << "sorted" << std::endl;
             uint64_t n_simd_sorted = wrapper_sorted(&overlap_scalar_first_match, n_queries, queries, n_ranges_pairs, ivals, timings[12]);
-            std::cerr << "method=" << "sorted binary" << std::endl;
             uint64_t n_simd_sorted_binary = wrapper_sorted(&overlap_scalar_binary_firstmatch, n_queries, queries, n_ranges_pairs, ivals, timings[13]);
             std::cerr << "sorted_naive=" << n_simd_sorted << std::endl;
             std::cerr << "sorted_binary=" << n_simd_sorted_binary << std::endl;
+            assert(n_simd_sorted == n_simd_sorted_binary);
+            assert(n_simd_sorted == n_binary);
 
             // Print output in nanoseconds.
             std::cout << n_ranges_pairs << "\t" << n_queries << "\t" << c;
