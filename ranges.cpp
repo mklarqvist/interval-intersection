@@ -391,11 +391,11 @@ bool overlap_scalar_binary(const uint32_t query, const ssize_t n, const uint32_t
     test* tt = (test*)(ranges);
 
     // Binary search
-    uint32_t from = 0, to = n/2, mid = 0;
+    uint32_t from = 0, to = (n / 2) - 1, mid = 0;
     while (true) {
         mid = (to + from) / 2;
-        __builtin_prefetch(&tt[(mid + 1 + to)/2], 0, 1);
-        __builtin_prefetch(&tt[(from + mid - 1)/2], 0, 1);
+        __builtin_prefetch(&tt[(mid + 1 + to) / 2],   0, 1);
+        __builtin_prefetch(&tt[(from + mid - 1) / 2], 0, 1);
 
         if(tt[mid].b <= query) from = mid + 1;
         else if(tt[mid].a >= query) to = mid - 1;
@@ -711,9 +711,15 @@ bool bench() {
     // 233,785 exons and 207,344 introns from 20,246 annotated genes (hg38)
     std::vector<uint32_t> n_ranges = {8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,524288,1048576,2097152,4194304,8388608,16777216,33554432,67108864,134217728,268435456};
 
+    bool sort_query_intervals = false; // set to true to check performance of both sets being sorted
+    uint32_t interval_min_range = 0, interval_max_range = 250e6; // chromosome 1 is 249Mb
+    uint32_t query_min_range = 40e6, query_max_range = 140e6;
+    uint32_t n_queries = 10e6;
+    uint32_t n_repeats = 5;
+
+    std::cerr << "Queries=" << n_queries << std::endl;
+
     for (int r = 0; r < n_ranges.size(); ++r) {
-        uint32_t min_range = 0, max_range = 100e6;
-        uint32_t n_queries = 10e6;
         //uint32_t* ranges   = new uint32_t[n_ranges[r]];
         //uint32_t* queries  = new uint32_t[n_queries];
 
@@ -723,9 +729,10 @@ bool bench() {
         
         std::random_device rd; // obtain a random number from hardware
         std::mt19937 eng(rd()); // seed the generator
-        std::uniform_int_distribution<uint32_t> distr(min_range, max_range); // right inclusive
+        std::uniform_int_distribution<uint32_t> distr(interval_min_range, interval_max_range); // right inclusive
+        std::uniform_int_distribution<uint32_t> distrL(query_min_range, query_max_range); // right inclusive
 
-        for (int c = 0; c < 50; ++c) {
+        for (int c = 0; c < n_repeats; ++c) {
             // Generate queries
             for (int i = 0; i < n_ranges[r]; ++i) {
                 ranges[i] = distr(eng);
@@ -794,7 +801,7 @@ bool bench() {
 
             // Generate points as queries.
             for (int i = 0; i < n_queries; ++i) {
-                queries[i] = distr(eng);
+                queries[i] = distrL(eng);
             }
 
             /*
@@ -824,6 +831,7 @@ bool bench() {
             uint64_t n_ekg_tree = wrapper_tree(n_queries, queries, n_ranges[r], ranges, timings[10]);
             //uint64_t n_ekg_tree = 0;
             std::cerr << "BINARY=" << n_binary << " and " << n_simd_binary << " EKG=" << n_ekg_tree << std::endl;
+            assert(n_binary == n_ekg_tree);
 
             uint64_t n_squash = wrapper_listsquash(&overlap_scalar_binary_skipsquash, 
                                                    n_queries, queries, 
@@ -833,9 +841,12 @@ bool bench() {
             
             std::cerr << "squash=" << n_squash << std::endl;
 
+            assert(n_squash == n_binary);
+
+            // Print output in nanoseconds.
             std::cout << n_ranges[r] << "\t" << n_queries << "\t" << c;
             for (int i = 0; i < 12; ++i) {
-                std::cout << "\t" << timings[i];
+                std::cout << "\t" << (double)timings[i]/n_queries*1000.0;
             }
             std::cout << std::endl;
         
