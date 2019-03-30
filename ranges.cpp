@@ -536,43 +536,41 @@ bool overlap_scalar_binary_skipsquash(const uint32_t query, const ssize_t n_rang
             if(to - from <= 32) break; // region is small
         }
         
-
         //std::cerr << "here= " << from << "-" << to << " for " << to-from << " lim=" << d.size() << std::endl;
         //for (int i = 0; i + 2 <= d.size(); i += 2) {
         //    overlaps += (query < d[i+1] && query > d[i]);
         //}
         //return overlaps;
 
-        
         // for (int i = from; i <= to; ++i) {
         //     overlaps += (query < ranges[i].right && query > ranges[i].left);
         // }
 
         // uint32_t tot = 0;
-    uint32_t target_range = to - from + 1;
-    uint32_t n_cycles = 2*target_range / (sizeof(__m128i)/sizeof(uint32_t));
-    __m128i* vec = (__m128i*)(&ranges[from]);
-    
-    const __m128i q = _mm_set1_epi32(query);
-    const __m128i one_mask = _mm_set1_epi32(1);
-    __m128i add = _mm_set1_epi32(0);
-    
-    int i = 0;
-    for (/**/; i <= n_cycles; ++i) {
-        __m128i v0 = _mm_loadu_si128(vec + i + 0);
-        __m128i lt = _mm_cmplt_epi32(q, v0);
-        __m128i gt = _mm_cmpgt_epi32(q, v0);
-        __m128i shuffle1 = _mm_srli_epi64(lt, 32);
-        __m128i collapse = _mm_and_si128(shuffle1 & gt, one_mask);
-        add = _mm_add_epi32(add, collapse);
-    }
+        uint32_t target_range = to - from + 1;
+        uint32_t n_cycles = 2*target_range / (sizeof(__m128i)/sizeof(uint32_t));
+        __m128i* vec = (__m128i*)(&ranges[from]);
+        
+        const __m128i q = _mm_set1_epi32(query);
+        const __m128i one_mask = _mm_set1_epi32(1);
+        __m128i add = _mm_set1_epi32(0);
+        
+        int i = 0;
+        for (/**/; i <= n_cycles; ++i) {
+            __m128i v0 = _mm_loadu_si128(vec + i + 0);
+            __m128i lt = _mm_cmplt_epi32(q, v0);
+            __m128i gt = _mm_cmpgt_epi32(q, v0);
+            __m128i shuffle1 = _mm_srli_epi64(lt, 32);
+            __m128i collapse = _mm_and_si128(shuffle1 & gt, one_mask);
+            add = _mm_add_epi32(add, collapse);
+        }
 
-    for (int i = 0; i < 4; ++i) overlaps += _mm_extract_epi32(add, i);
+        for (int i = 0; i < 4; ++i) overlaps += _mm_extract_epi32(add, i);
 
-    i *= (sizeof(__m128i)/sizeof(uint32_t));
-    for (/**/; i <= to; ++i) {
-        overlaps += (query < ranges[i].right && query > ranges[i].left);
-    }
+        i *= (sizeof(__m128i)/sizeof(uint32_t));
+        for (/**/; i <= to; ++i) {
+            overlaps += (query < ranges[i].right && query > ranges[i].left);
+        }
         
 
         //std::cerr << "overlaps=" << overlaps << std::endl;
@@ -823,7 +821,7 @@ bool bench() {
     // 233,785 exons and 207,344 introns from 20,246 annotated genes (hg38)
     
     //std::vector<uint32_t> n_ranges = {8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,524288,1048576,2097152,4194304,8388608,16777216,33554432,67108864,134217728,268435456};
-    std::vector<uint32_t> n_ranges = {2048,4096,8192,16384,32768,65536,131072,262144,524288,1048576,2097152,4194304,8388608,16777216,33554432,67108864,134217728,268435456};
+    std::vector<uint32_t> n_ranges = {16384,32768,65536,131072,262144,524288,1048576,2097152,4194304,8388608,16777216,33554432,67108864,134217728,268435456};
     
     bool sort_query_intervals = true; // set to true to check performance of both sets being sorted
     uint32_t interval_min_range = 0, interval_max_range = 250e6; // chromosome 1 is 249Mb
@@ -849,6 +847,8 @@ bool bench() {
         std::uniform_int_distribution<uint32_t> distrL(query_min_range, query_max_range); // right inclusive
 
         for (int c = 0; c < n_repeats; ++c) {
+            std::cerr << "[GENERATING]>>>>> At=" << n_ranges[r] << std::endl;
+            
             // Generate queries
             for (int i = 0; i < n_ranges[r]; ++i) {
                 ranges[i] = distr(eng);
@@ -946,7 +946,7 @@ bool bench() {
 
             uint64_t timings[64] = {0};
 
-            if (n_ranges[r] <= 8192) {
+            if (n_ranges[r] <= 1024) {
                 uint64_t n_scalar_nosimd = wrapper(&overlap_scalar_nosimd, n_queries, queries, n_ranges_pairs, ivals, timings[0]);
                 uint64_t n_scalar = wrapper(&overlap_scalar, n_queries, queries, n_ranges_pairs, ivals, timings[1]);
                 uint64_t n_scalar_break = wrapper(&overlap_scalar_break, n_queries, queries, n_ranges_pairs, ivals, timings[2]);
@@ -970,7 +970,9 @@ bool bench() {
             }
             
             uint64_t n_binary = wrapper(&overlap_scalar_binary, n_queries, queries, n_ranges_pairs, ivals, timings[8]);
-            uint64_t n_simd_binary = wrapper(&overlap_simd_add_binary, n_queries, queries, n_ranges_pairs, ivals, timings[9]);
+            
+            //uint64_t n_simd_binary = wrapper(&overlap_simd_add_binary, n_queries, queries, n_ranges_pairs, ivals, timings[9]);
+            uint64_t n_simd_binary = 0;
             uint64_t n_ekg_tree = wrapper_tree(n_queries, queries, n_ranges_pairs, ivals, timings[10]);
             //uint64_t n_ekg_tree = 0;
             std::cerr << "BINARY=" << n_binary << " and " << n_simd_binary << " EKG=" << n_ekg_tree << std::endl;
@@ -986,12 +988,17 @@ bool bench() {
 
             assert(n_squash == n_binary);
 
-            uint64_t n_simd_sorted = wrapper_sorted(&overlap_scalar_first_match, n_queries, queries, n_ranges_pairs, ivals, timings[12]);
+            uint64_t n_simd_sorted = 0;
+            if (n_ranges[r] <= 1024) {
+                n_simd_sorted = wrapper_sorted(&overlap_scalar_first_match, n_queries, queries, n_ranges_pairs, ivals, timings[12]);
+                assert(n_simd_sorted == n_binary);
+                std::cerr << "sorted_naive=" << n_simd_sorted << std::endl;
+            }
+
             uint64_t n_simd_sorted_binary = wrapper_sorted(&overlap_scalar_binary_firstmatch, n_queries, queries, n_ranges_pairs, ivals, timings[13]);
-            std::cerr << "sorted_naive=" << n_simd_sorted << std::endl;
             std::cerr << "sorted_binary=" << n_simd_sorted_binary << std::endl;
-            assert(n_simd_sorted == n_simd_sorted_binary);
-            assert(n_simd_sorted == n_binary);
+            assert(n_simd_sorted_binary == n_binary);
+            
 
             // Print output in nanoseconds.
             std::cout << n_ranges_pairs << "\t" << n_queries << "\t" << c;
