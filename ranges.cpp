@@ -196,16 +196,19 @@ bool overlap_scalar_break(const uint32_t query, const ssize_t n, const interval*
 }
 
 bool overlap_simd(const uint32_t query, const ssize_t n, const interval* ranges) {
-    uint32_t n_cycles = 2*n / (sizeof(__m128i)/sizeof(uint32_t));
-    __m128i* vec = (__m128i*)(ranges);
+    //uint32_t n_cycles = 2*n / (sizeof(__m128i)/sizeof(uint32_t));
+    //__m128i* vec = (__m128i*)(ranges);
     const __m128i q = _mm_set1_epi32(query);
     const __m128i one_mask = _mm_set1_epi32(1);
     __m128i counters = _mm_set1_epi32(0);
+    const uint32_t* r = (const uint32_t*)ranges;
 
     uint32_t tot = 0;
-    for (int i = 0; i < n_cycles; ++i) {
-        __m128i lt = _mm_cmplt_epi32(q, vec[i]);
-        __m128i gt = _mm_cmpgt_epi32(q, vec[i]);
+    int i = 0;
+    for (; i + 4 <= 2*n; i += 4) {
+        __m128i v0 = _mm_lddqu_si128((__m128i*)r + i);
+        __m128i lt = _mm_cmplt_epi32(q, v0);
+        __m128i gt = _mm_cmpgt_epi32(q, v0);
         __m128i shuffle1 = _mm_srli_epi64(lt, 32);
         __m128i collapse = _mm_and_si128(shuffle1 & gt, one_mask);
         counters = _mm_add_epi32(counters, collapse);
@@ -213,19 +216,24 @@ bool overlap_simd(const uint32_t query, const ssize_t n, const interval* ranges)
 
     for (int i = 0; i < 4; ++i) tot += _mm_extract_epi32(counters, i);
 
+    i /= 2;
+    for (; i < n; ++i) {
+        tot += (query < ranges[i].right && query > ranges[i].left);
+    }
+
     return tot;
 }
 
 bool overlap_simd_add(const uint32_t query, const ssize_t n, const interval* ranges) {
     uint32_t n_cycles = 2*n / (sizeof(__m128i)/sizeof(uint32_t));
-    __m128i* vec = (__m128i*)(ranges);
+    //__m128i* vec = (__m128i*)(ranges);
     __m128i q = _mm_set1_epi32(query);
     __m128i add = _mm_set1_epi32(0);
     const __m128i one_mask = _mm_set1_epi32(1);
 
     uint32_t tot = 0;
     for (int i = 0; i < n_cycles; ++i) {
-        __m128i v0 = _mm_loadu_si128(vec + i + 0);
+        __m128i v0 = _mm_lddqu_si128((__m128i*)ranges + i + 0);
         __m128i lt = _mm_cmplt_epi32(q, v0);
         __m128i gt = _mm_cmpgt_epi32(q, v0);
         __m128i shuffle1 = _mm_srli_epi64(lt, 32);
@@ -234,6 +242,10 @@ bool overlap_simd_add(const uint32_t query, const ssize_t n, const interval* ran
     }
 
     for (int i = 0; i < 4; ++i) tot += _mm_extract_epi32(add, i);
+
+    for (int i = n_cycles*4; i < n; ++i) {
+        tot += (query < ranges[i].right && query > ranges[i].left);
+    }
 
     return tot;
 }
@@ -275,6 +287,10 @@ bool overlap_simd_add_unroll2(const uint32_t query, const ssize_t n, const inter
     }
 
     for (int i = 0; i < 4; ++i) tot += _mm_extract_epi32(add, i);
+
+    for (int i = n_cycles*4; i < n; ++i) {
+        tot += (query < ranges[i].right && query > ranges[i].left);
+    }
 
     return tot;
 }
@@ -349,6 +365,10 @@ bool overlap_simd_add_unroll4(const uint32_t query, const ssize_t n, const inter
 
     for (int i = 0; i < 4; ++i) tot += _mm_extract_epi32(add, i);
 
+    for (int i = n_cycles*4; i < n; ++i) {
+        tot += (query < ranges[i].right && query > ranges[i].left);
+    }
+
     return tot;
 }
 
@@ -369,6 +389,10 @@ bool overlap_avx2(const uint32_t query, const ssize_t n, const interval* ranges)
         __m256i shuffle1 = _mm256_shuffle_epi32(lt, _MM_SHUFFLE(2,3,0,1));
         __m256i collapse = _mm256_and_si256(shuffle1, gt);
         PIL_POPCOUNT_AVX2(tot, collapse);
+    }
+    
+    for (int i = n_cycles*8; i < n; ++i) {
+        tot += (query < ranges[i].right && query > ranges[i].left);
     }
 
     return tot;
@@ -405,11 +429,7 @@ bool overlap_scalar_binary(const uint32_t query, const ssize_t n, const interval
 
         if(ranges[mid].right <= query) from = mid + 1;
         else if(ranges[mid].left >= query) to = mid - 1;
-        else {
-            //std::cerr << "match=" << ranges[mid].a << "-" << ranges[mid].b << " with q=" << query << std::endl;
-            //assert(query < ranges[mid].b && query > ranges[mid].a);
-            return true;
-        }
+        else return true;
 
         if(to - from <= 32) break; // region is small
     }
@@ -487,99 +507,47 @@ bool overlap_scalar_binary_skipsquash(const uint32_t query, const ssize_t n_rang
     if (n_ranges < 4)
         return overlap_scalar(query, n_ranges, ranges);
 
-    if (query < ranges[0].left)    return false; // if first interval [A,B] start after the query then never overlap
+    if (query < ranges[0].left) return false; // if first interval [A,B] start after the query then never overlap
     if (query > ranges[n_ranges-1].right) return false; // if the query starts after the last interval then never overlap
 
     const uint32_t target_bin = query / bin_size; // single position / bin_size
-    if ((bitmaps[target_bin / 64] & (1ULL << (target_bin % 64))) == 0) 
+
+    if ((bitmaps[target_bin / 64] & (1ULL << (target_bin % 64))) == 0)
         return false; // squash
 
-    //int target_bucket = __builtin_ctzll(bitmaps[target_bin / 64] & (1ULL << (target_bin % 64))) + 1;
-    //const uint32_t target_bucket = target_bin % 64;
-    //std::cerr << "trailing = " << target_bucket - 1  << " " << std::bitset<64>(bitmaps[target_bin / 64] & (1ULL << (target_bin % 64))) << std::endl;
-    //std::cerr << target_bin << "->" << target_bucket << " or " << __builtin_ctzll(bitmaps[target_bin / 64] & (1ULL << (target_bin % 64))) << std::endl;
-
-    //std::cerr << "QUERY=" << query << std::endl;
-    //for (int i = 0; i < bitmap_data[target_bucket].intervals.size(); ++i) {
-    //    std::cerr << " " << bitmap_data[target_bucket].intervals[i];
-    //}
-    //std::cerr << std::endl;
-
     uint32_t overlaps = 0;
-
     const std::vector<interval>& d = bitmap_data[target_bin].intervals;
     if (query < d.front().left)  return false; // if first interval [A,B] start after the query then never overlap
     if (query > d.back().right)  return false; // if the query starts after the last interval then never overlap
 
-    if (d.size() < 32) {
-        for (int i = 0; i < d.size(); ++i) {
-            overlaps += (query < d[i].right && query > d[i].left);
-        }
-        return overlaps;
-        //return (overlap_scalar(query, d.size(), &d[0]));       
+    if (1) {
+        return overlap_simd(query, d.size(), &d[0]);
+
+        // for (int i = 0; i < d.size(); ++i) {
+        //     overlaps += (query < d[i].right && query > d[i].left);
+        // }
+        //const uint32_t cycle_range = (to - from + 1);
+       
+
+        // return overlaps;
     } else {
+        std::cerr << "never" << std::endl;
         // Binary search
         uint32_t from = 0, to = d.size() - 1, mid = 0;
         while (true) {
             mid = (to + from) / 2;
-            __builtin_prefetch(&ranges[(mid + 1 + to) / 2],   0, 1);
-            __builtin_prefetch(&ranges[(from + mid - 1) / 2], 0, 1);
+            __builtin_prefetch(&d[(mid + 1 + to) / 2],   0, 1);
+            __builtin_prefetch(&d[(from + mid - 1) / 2], 0, 1);
 
-            if(ranges[mid].right <= query) from = mid + 1;
-            else if(ranges[mid].left >= query) to = mid - 1;
-            else {
-                //std::cerr << "match=" << ranges[mid].a << "-" << ranges[mid].b << " with q=" << query << std::endl;
-                assert(query < ranges[mid].right && query > ranges[mid].left);
-                return true;
-            }
+            if(d[mid].right <= query) from = mid + 1;
+            else if(d[mid].left >= query) to = mid - 1;
+            else return true;
 
             if(to - from <= 32) break; // region is small
         }
-        
-        //std::cerr << "here= " << from << "-" << to << " for " << to-from << " lim=" << d.size() << std::endl;
-        //for (int i = 0; i + 2 <= d.size(); i += 2) {
-        //    overlaps += (query < d[i+1] && query > d[i]);
-        //}
-        //return overlaps;
 
-        // for (int i = from; i <= to; ++i) {
-        //     overlaps += (query < ranges[i].right && query > ranges[i].left);
-        // }
-
-        // uint32_t tot = 0;
-        uint32_t target_range = to - from + 1;
-        uint32_t n_cycles = 2*target_range / (sizeof(__m128i)/sizeof(uint32_t));
-        __m128i* vec = (__m128i*)(&ranges[from]);
-        
-        const __m128i q = _mm_set1_epi32(query);
-        const __m128i one_mask = _mm_set1_epi32(1);
-        __m128i add = _mm_set1_epi32(0);
-        
-        int i = 0;
-        for (/**/; i <= n_cycles; ++i) {
-            __m128i v0 = _mm_loadu_si128(vec + i + 0);
-            __m128i lt = _mm_cmplt_epi32(q, v0);
-            __m128i gt = _mm_cmpgt_epi32(q, v0);
-            __m128i shuffle1 = _mm_srli_epi64(lt, 32);
-            __m128i collapse = _mm_and_si128(shuffle1 & gt, one_mask);
-            add = _mm_add_epi32(add, collapse);
-        }
-
-        for (int i = 0; i < 4; ++i) overlaps += _mm_extract_epi32(add, i);
-
-        i *= (sizeof(__m128i)/sizeof(uint32_t));
-        for (/**/; i <= to; ++i) {
-            overlaps += (query < ranges[i].right && query > ranges[i].left);
-        }
-        
-
-        //std::cerr << "overlaps=" << overlaps << std::endl;
-        //if(overlaps) std::cerr << "overlaps MOTHERFUKKKKA" << std::endl;
-
-        //if(overlaps) std::cerr << "overlaps" << std::endl;
+        return overlap_simd_add(query, to - from + 1, &d[from]);
     }
-
-    return overlaps;
 }
 
 bool overlap_scalar_binary_firstmatch(const uint32_t query, const ssize_t n, const interval* ranges, const interval*& hit) {
@@ -821,7 +789,7 @@ bool bench() {
     // 233,785 exons and 207,344 introns from 20,246 annotated genes (hg38)
     
     //std::vector<uint32_t> n_ranges = {8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,524288,1048576,2097152,4194304,8388608,16777216,33554432,67108864,134217728,268435456};
-    std::vector<uint32_t> n_ranges = {16384,32768,65536,131072,262144,524288,1048576,2097152,4194304,8388608,16777216,33554432,67108864,134217728,268435456};
+    std::vector<uint32_t> n_ranges = {64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,524288,1048576,2097152,4194304,8388608,16777216,33554432,67108864,134217728,268435456};
     
     bool sort_query_intervals = true; // set to true to check performance of both sets being sorted
     uint32_t interval_min_range = 0, interval_max_range = 250e6; // chromosome 1 is 249Mb
@@ -867,59 +835,29 @@ bool bench() {
             uint32_t n_bins = std::min(n_ranges[r], std::min((uint32_t)n_ranges[r]/8, (uint32_t)131072)); // choose this such that no more than 50% of bits are ever set
             uint32_t step_size = ranges[n_ranges[r]-1] / n_bins + 1;
             std::cerr << "max=" << ranges[n_ranges[r]-1] << " -> " << n_bins << "," << step_size << std::endl;
-            //std::cerr << "bins=" << std::endl;
-
-            uint32_t n_bitmaps = n_bins/64 + 1;
+            
+            const uint32_t n_bitmaps = n_bins/64 + 1;
             uint64_t* bitmaps = new uint64_t[n_bitmaps];
             memset(bitmaps,0,sizeof(uint64_t)*n_bitmaps);
 
             std::vector<bitmap_helper> bitmaps_pointers(n_bins + 1);
 
             // Map interval to segments and update segmental bitmap.
-            for (int i = 0; i + 2 <= n_ranges[r]; i += 2) {
-                uint32_t from = ranges[i+0] / step_size;
-                uint32_t to   = ranges[i+1] / step_size;
+            for (int i = 0; i < n_ranges_pairs; ++i) {
+                uint32_t from = ivals[i].left / step_size;
+                uint32_t to   = ivals[i].right / step_size;
                 for (int k = from; k <= to; ++k) {
                     // Set bit for segment.
                     bitmaps[k / 64] |= 1ULL << (k % 64);
-                   
-                    // Debug
-                    if(k/64 >= n_bitmaps) {
-                        std::cerr << "illegal bitmap k=" << k << ":" << k/64 << "/" << n_bitmaps << std::endl;
-                        exit(1);
-                    }
-
-                    // Debug
-                    if(k >= bitmaps_pointers.size()) {
-                        std::cerr << "out of bounds:" << k << "/" << bitmaps_pointers.size() << std::endl;
-                    }
 
                     // Copy data into segment.
                     // These are sorted so added in-order.
-                    interval iv; iv.left = ranges[i+0]; iv.right = ranges[i+1];
-                    bitmaps_pointers[k].intervals.push_back(iv);
+                    //interval iv; iv.left = iranges[i+0]; iv.right = ranges[i+1];
+                    bitmaps_pointers[k].intervals.push_back(ivals[i]);
                 }
             }
 
-            /*
-            for (int i = 0; i < bitmaps_pointers.size(); ++i) {
-                if(bitmaps_pointers[i].intervals.size()) {
-                    std::cerr << "pointers=" << bitmaps_pointers[i].intervals.size() << std::endl;
-                    for (int k = 0; k + 2 <= bitmaps_pointers[i].intervals.size(); k += 2) {
-                        std::cerr << "," << bitmaps_pointers[i].intervals[k+0] << "-" << bitmaps_pointers[i].intervals[k+1];
-                    }
-                    std::cerr << std::endl;
-                }                    
-            }
-            */
-
-            //std::cerr << std::bitset<64>(bitmaps[0]) << " " << std::bitset<64>(bitmaps[1]) << std::endl;
             ///////////////////////////////////////////////////////////////
-
-            //for (int i = 1; i + 2 < n_ranges; i += 2) {
-            //    ranges[i] = std::numeric_limits<uint32_t>::max() >> 1;
-            //}
-            //n_ranges[r] /= 2;
 
             // Generate points as queries.
             for (int i = 0; i < n_queries; ++i) {
@@ -981,7 +919,8 @@ bool bench() {
             uint64_t n_squash = wrapper_listsquash(&overlap_scalar_binary_skipsquash, 
                                                    n_queries, queries, 
                                                    n_ranges_pairs, ivals, 
-                                                   bitmaps, bitmaps_pointers.size(), step_size, bitmaps_pointers, 
+                                                   bitmaps, bitmaps_pointers.size(), 
+                                                   step_size, bitmaps_pointers, 
                                                    timings[11]);
             
             std::cerr << "squash=" << n_squash << std::endl;
