@@ -8,6 +8,7 @@
 #include <vector> //vector
 
 #include "IntervalTree.h"
+#include "ivan_intervaltree.hpp"
 
 /*
 interval ideas:
@@ -116,8 +117,8 @@ struct interval {
 };
 
 struct bitmap_helper {
-    //std::shared_ptr< std::vector<interval> > intervals;
-    std::vector<interval> intervals;
+    std::shared_ptr< std::vector<interval> > intervals;
+    // std::vector<interval> intervals;
 };
 
 /*------ Function pointers --------*/
@@ -240,33 +241,101 @@ bool overlap_simd_add(const uint32_t query, const ssize_t n, const interval* ran
 }
 
 bool overlap_simd_add_firstmatch(const uint32_t query, const ssize_t n, const interval* ranges, const interval*& hit) {
-    uint32_t n_cycles = 2*n / (sizeof(__m128i)/sizeof(uint32_t));
-    //__m128i* vec = (__m128i*)(ranges);
     __m128i q = _mm_set1_epi32(query);
-    //__m128i add = _mm_set1_epi32(0);
-    //const __m128i one_mask = _mm_set1_epi32(1);
     const uint32_t* r = (const uint32_t*)ranges;
 
-    uint64_t tot = 0;
     ssize_t i = 0;
     for (; i + 4 <= 2*n; i += 4) {
         __m128i v0 = _mm_lddqu_si128((__m128i*)(r + i + 0));
         __m128i lt = _mm_cmplt_epi32(q, v0);
         __m128i gt = _mm_cmpgt_epi32(q, v0);
         __m128i shuffle1 = _mm_srli_epi64(lt, 32);
-        //__m128i collapse = _mm_and_si128(shuffle1 & gt, one_mask);
-        //add = _mm_add_epi32(add, collapse);
-        tot += _mm_movemask_epi8(shuffle1 & gt);
+        __m128i collapse = _mm_and_si128(shuffle1, gt);
+        if (_mm_movemask_epi8(collapse)) {
+            if (_mm_extract_epi32(collapse, 2)) {
+                assert(query < ranges[(i / 2) + 1].right && query > ranges[(i / 2) + 1].left);
+                hit = &ranges[(i / 2) + 1]; 
+                return true;
+            } else {
+                assert(query < ranges[(i / 2) + 0].right && query > ranges[(i / 2) + 0].left);
+                hit = &ranges[(i / 2) + 0]; 
+                return true;
+            }
+        }
     }
-
-    //for (int i = 0; i < 4; ++i) tot += _mm_extract_epi32(add, i);
 
     i /= 2;
     for (; i < n; ++i) {
-        tot += (query < ranges[i].right && query > ranges[i].left);
+        if (query < ranges[i].right && query > ranges[i].left) {
+            hit = &ranges[i]; 
+            return true;
+        }
     }
 
-    return tot;
+    return false;
+}
+
+bool overlap_avx2_add_firstmatch(const uint32_t query, const ssize_t n, const interval* ranges, const interval*& hit) {
+    __m256i q = _mm256_set1_epi32(query);
+    const uint32_t* r = (const uint32_t*)ranges;
+
+    ssize_t i = 0;
+    for (; i + 8 <= 2*n; i += 8) {
+        __m256i v0 = _mm256_lddqu_si256((__m256i*)(r + i + 0));
+        __m256i lt = _mm256_cmpgt_epi32(v0, q);
+        __m256i gt = _mm256_cmpgt_epi32(q, v0);
+        __m256i shuffle1 = _mm256_srli_epi64(lt, 32);
+        __m256i collapse = _mm256_and_si256(shuffle1, gt);
+        if (_mm256_movemask_epi8(collapse)) {
+            if (_mm256_extract_epi32(collapse, 6)) {
+                assert(query < ranges[(i / 2) + 3].right && query > ranges[(i / 2) + 3].left);
+                hit = &ranges[(i / 2) + 3]; 
+                return true;
+            } else if (_mm256_extract_epi32(collapse, 4)) {
+                assert(query < ranges[(i / 2) + 2].right && query > ranges[(i / 2) + 2].left);
+                hit = &ranges[(i / 2) + 2]; 
+                return true;
+            } else if (_mm256_extract_epi32(collapse, 2)) {
+                assert(query < ranges[(i / 2) + 1].right && query > ranges[(i / 2) + 1].left);
+                hit = &ranges[(i / 2) + 1]; 
+                return true;
+            } else {
+                assert(query < ranges[(i / 2) + 0].right && query > ranges[(i / 2) + 0].left);
+                hit = &ranges[(i / 2) + 0]; 
+                return true;
+            }
+        }
+    }
+
+    __m128i q128 = _mm_set1_epi32(query);
+    for (; i + 4 <= 2*n; i += 4) {
+        __m128i v0 = _mm_lddqu_si128((__m128i*)(r + i + 0));
+        __m128i lt = _mm_cmplt_epi32(q128, v0);
+        __m128i gt = _mm_cmpgt_epi32(q128, v0);
+        __m128i shuffle1 = _mm_srli_epi64(lt, 32);
+        __m128i collapse = _mm_and_si128(shuffle1, gt);
+        if (_mm_movemask_epi8(collapse)) {
+            if (_mm_extract_epi32(collapse, 2)) {
+                assert(query < ranges[(i / 2) + 1].right && query > ranges[(i / 2) + 1].left);
+                hit = &ranges[(i / 2) + 1]; 
+                return true;
+            } else {
+                assert(query < ranges[(i / 2) + 0].right && query > ranges[(i / 2) + 0].left);
+                hit = &ranges[(i / 2) + 0]; 
+                return true;
+            }
+        }
+    }
+
+    i /= 2;
+    for (; i < n; ++i) {
+        if (query < ranges[i].right && query > ranges[i].left) {
+            hit = &ranges[i]; 
+            return true;
+        }
+    }
+
+    return false;
 }
 
 bool overlap_simd_add_unroll2(const uint32_t query, const ssize_t n, const interval* ranges) {
@@ -554,7 +623,7 @@ bool overlap_scalar_binary_skipsquash(const uint32_t query, const ssize_t n_rang
         return false; // squash
 
     uint32_t overlaps = 0;
-    const std::vector<interval>& d = bitmap_data[target_bin].intervals;
+    const std::vector<interval>& d = *bitmap_data[target_bin].intervals;
     if (query < d.front().left)  return false; // if first interval [A,B] start after the query then never overlap
     if (query > d.back().right)  return false; // if the query starts after the last interval then never overlap
 
@@ -644,12 +713,12 @@ bool overlap_scalar_binary_skipsquash(const uint32_t query, const ssize_t n_rang
         return false; // squash
 
     uint32_t overlaps = 0;
-    const std::vector<interval>& d = bitmap_data[target_bin].intervals;
+    const std::vector<interval>& d = *bitmap_data[target_bin].intervals;
     if (query < d.front().left)  return false; // if first interval [A,B] start after the query then never overlap
     if (query > d.back().right)  return false; // if the query starts after the last interval then never overlap
 
     if (d.size() < 32) {
-        return overlap_scalar_first_match(query, d.size(), &d[0], hit);
+        return overlap_avx2_add_firstmatch(query, d.size(), &d[0], hit);
     } else {
         // Binary search
         uint32_t from = 0, to = d.size() - 1, mid = 0;
@@ -668,76 +737,13 @@ bool overlap_scalar_binary_skipsquash(const uint32_t query, const ssize_t n_rang
             if(to - from <= 32) break; // region is small
         }
 
-        return overlap_scalar_first_match(query, to - from + 1, &d[from], hit);
+        return overlap_avx2_add_firstmatch(query, to - from + 1, &d[from], hit);
     }
 }
 
 // Definition for microsecond timer.
 typedef std::chrono::high_resolution_clock hclock;
 typedef hclock::time_point clockdef;
-
-bool debug_bench() {
-    uint32_t n_ranges = 8;
-    uint32_t min_range = 0, max_range = 16;
-    
-    uint32_t* ranges = new uint32_t[n_ranges];
-    interval* ivals = new interval[n_ranges/2];
-    
-    std::random_device rd; // obtain a random number from hardware
-    std::mt19937 eng(rd()); // seed the generator
-    std::uniform_int_distribution<uint32_t> distr(min_range, max_range); // right inclusive
-
-    uint32_t query = 9;
-
-    for (int c = 0; c < 10000; ++c) {
-        std::vector< Interval<uint32_t,uint32_t> > intervals;
-        intervals.resize(n_ranges); // stupid because intervaltree corrupts data
-
-        for (int i = 0; i < n_ranges; ++i) {
-            ranges[i] = distr(eng);
-            //std::cout << " " << ranges[i];
-        }
-        //std::cout << std::endl;
-
-        std::sort(ranges, &ranges[n_ranges]);
-        //for (int i = 0; i < n_ranges; ++i) {
-        //    std::cout << " " << ranges[i];
-        //}
-        //std::cout << std::endl;
-
-        for (int i = 0, j = 0; i + 2 <= n_ranges; i += 2, ++j) {
-            intervals[j].start = ranges[i+0];
-            intervals[j].stop  = ranges[i+1];
-            ivals[j].left  = ranges[i+0];
-            ivals[j].right = ranges[i+1];
-        }
-
-        //for (int i = 0; i < n_ranges/2; ++i) {
-        //    std::cout << " " << intervals[i].start << "," << intervals[i].stop;
-        //}
-        //std::cout << std::endl;
-
-        // Start timer.
-        //n_ranges /= 2;
-
-        IntervalTree<uint32_t,uint32_t> itree(std::move(intervals));
-        std::vector< Interval<uint32_t,uint32_t> > results;
-        results.reserve(10);
-        //std::cerr << "done build" << std::endl;
-        
-        bool a = overlap_scalar(query, n_ranges/2, ivals);
-        bool b = overlap_simd(query, n_ranges/2, ivals);
-        bool i_c = overlap_ekg_itree(itree, results, query, n_ranges/2, ivals);
-        
-        //std::cout << a << "," << b << "," << i_c << std::endl;
-        //assert(a == b);
-        //assert(i_c == a);
-    }
-
-    delete[] ranges;
-    delete[] ivals;
-    return true;
-}
 
 uint64_t wrapper(overlap_func f, 
                  ssize_t n_queries, uint32_t* queries, 
@@ -928,7 +934,7 @@ bool bench() {
     uint32_t interval_min_range = 0, interval_max_range = 250e6; // chromosome 1 is 249Mb
     uint32_t query_min_range = 40e6, query_max_range = 140e6;
     uint32_t n_queries = 10e6;
-    uint32_t n_repeats = 10;
+    uint32_t n_repeats = 3;
 
     std::cerr << "Queries=" << n_queries << std::endl;
 
@@ -947,9 +953,9 @@ bool bench() {
         std::uniform_int_distribution<uint32_t> distr(interval_min_range, interval_max_range); // right inclusive
         std::uniform_int_distribution<uint32_t> distrL(query_min_range, query_max_range); // right inclusive
 
+        if (n_ranges[r] <= 1024) n_repeats = 25;
+
         for (int c = 0; c < n_repeats; ++c) {
-            std::cerr << "[GENERATING]>>>>> At=" << n_ranges[r] << std::endl;
-            
             // Generate queries
             for (int i = 0; i < n_ranges[r]; ++i) {
                 ranges[i] = distr(eng);
@@ -958,7 +964,6 @@ bool bench() {
             // SIMD methods require that the ranges are sorted.
             std::sort(ranges, &ranges[n_ranges[r]]);
 
-            std::cerr << "a" << std::endl;
             for (int i = 0, j = 0; i + 2 <= n_ranges[r]; i += 2, ++j) {
                 ivals[j].left  = ranges[i+0];
                 ivals[j].right = ranges[i+1];
@@ -966,9 +971,10 @@ bool bench() {
 
             ///////////////////////////////////////////////////////////////
             // Max value is back
-            std::cerr << "b" << std::endl;
-            uint32_t n_bins = std::min(n_ranges[r], std::min((uint32_t)n_ranges[r]/8, (uint32_t)131072)); // choose this such that no more than 50% of bits are ever set
+            std::cerr << "min=" << ranges[0] << " max=" << ranges[n_ranges[r]-1] << std::endl;
+            uint32_t n_bins = std::min(n_ranges[r], std::min((uint32_t)n_ranges[r]/8, (uint32_t)1562500)); // Limit 50 MB -> 50e6/32
             if (n_bins == 0) n_bins = n_ranges[r];
+            std::cerr << "number of bins=" << n_bins << std::endl;
             uint32_t step_size = ranges[n_ranges[r]-1] / n_bins + 1;
             std::cerr << "max=" << ranges[n_ranges[r]-1] << " -> " << n_bins << "," << step_size << std::endl;
             
@@ -989,10 +995,23 @@ bool bench() {
                     // Copy data into segment.
                     // These are sorted so added in-order.
                     //interval iv; iv.left = iranges[i+0]; iv.right = ranges[i+1];
-                    bitmaps_pointers[k].intervals.push_back(ivals[i]);
+                    if (bitmaps_pointers[k].intervals.get() == nullptr) {
+                        bitmaps_pointers[k].intervals = std::make_shared< std::vector<interval> >();
+                    }
+                    bitmaps_pointers[k].intervals->push_back(ivals[i]);
                 }
             }
 
+            uint64_t n_cnt_bucket = 0;
+            uint32_t n_non_empty = 0;
+            for (int i = 0; i < bitmaps_pointers.size(); ++i) {
+                if (bitmaps_pointers[i].intervals.get() != nullptr) {
+                    n_cnt_bucket += bitmaps_pointers[i].intervals->size();
+                    ++n_non_empty;
+                }
+            }
+            std::cerr << "[DEBUG] " << n_cnt_bucket << " from " << n_ranges_pairs << " (" << (float)n_cnt_bucket/n_ranges_pairs << "-fold duplication)" << std::endl;
+            std::cerr << "[DEBUG] " << n_non_empty << "/" << bitmaps_pointers.size() << " -> " << (double)n_cnt_bucket/n_non_empty << " entries/bucket" << std::endl;
             ///////////////////////////////////////////////////////////////
 
             // Generate points as queries.
@@ -1110,9 +1129,8 @@ bool bench() {
 }
 
 int main(int argc, char **argv) {
-    debug_bench();
-    std::cerr << "done" << std::endl;
-    bench();
-    std::cerr << "done bench" << std::endl;
-    return EXIT_SUCCESS;
+    if (bench())
+        return EXIT_SUCCESS;
+    else
+        return EXIT_FAILURE;
 }
