@@ -559,7 +559,11 @@ bool overlap_scalar_binary_skipsquash(const uint32_t query, const ssize_t n_rang
     if (query > d.back().right)  return false; // if the query starts after the last interval then never overlap
 
     if (d.size() < 32) {
+#if SIMD_VERSION >= 5
         return overlap_avx2(query, d.size(), &d[0]);
+#else
+        return overlap_simd_add(query, d.size(), &d[0]);
+#endif
     } else {
         // Binary search
         uint32_t from = 0, to = d.size() - 1, mid = 0;
@@ -575,7 +579,11 @@ bool overlap_scalar_binary_skipsquash(const uint32_t query, const ssize_t n_rang
             if(to - from <= 32) break; // region is small
         }
 
+#if SIMD_VERSION >= 5
         return overlap_avx2(query, to - from + 1, &d[from]);
+#else
+        return overlap_simd_add(query, to - from + 1, &d[from]);
+#endif
     }
 }
 
@@ -826,8 +834,7 @@ uint64_t wrapper_listsquash(overlap_func_squash f,
         uint64_t n_a = 0, n_b = 0;
         for (int i = 0; i < n_queries; ++i) {
             if (found) {
-                assert(prev != nullptr);
-
+                // assert(prev != nullptr);
                 if ((queries[i] < prev->right && queries[i] > prev->left)) {
                     ++n_overlaps;
                     ++n_a;
@@ -837,9 +844,20 @@ uint64_t wrapper_listsquash(overlap_func_squash f,
                     ++n_b;
                 }
             } else { // no previous
-                found = overlap_scalar_binary_skipsquash(queries[i], n_ranges, ranges, bitmaps, n_bitmaps, bin_size, bitmap_data, prev);
-                n_overlaps += found;
-                ++n_b;
+                if (prev != nullptr) {
+                    if (queries[i] < prev->left) {
+                        ++n_b;
+                        found = false;
+                    } else {
+                        found = overlap_scalar_binary_skipsquash(queries[i], n_ranges, ranges, bitmaps, n_bitmaps, bin_size, bitmap_data, prev);
+                        n_overlaps += found;
+                        ++n_b;
+                    }
+                } else {
+                    found = overlap_scalar_binary_skipsquash(queries[i], n_ranges, ranges, bitmaps, n_bitmaps, bin_size, bitmap_data, prev);
+                    n_overlaps += found;
+                    ++n_b;
+                }
             }
         }
 
@@ -903,7 +921,7 @@ bool bench() {
     // @see https://www.ncbi.nlm.nih.gov/genome/annotation_euk/Homo_sapiens/106/
     // 233,785 exons and 207,344 introns from 20,246 annotated genes (hg38)
     
-    //std::vector<uint32_t> n_ranges = {8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,524288,1048576,2097152,4194304,8388608,16777216,33554432,67108864,134217728,268435456};
+    //std::vector<uint32_t> n_ranges = {2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,524288,1048576,2097152,4194304,8388608,16777216,33554432,67108864,134217728,268435456};
     std::vector<uint32_t> n_ranges = {2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,524288,1048576,2097152,4194304,8388608,16777216,33554432,67108864,134217728,268435456};
     
     bool sort_query_intervals = true; // set to true to check performance of both sets being sorted
@@ -978,13 +996,18 @@ bool bench() {
             ///////////////////////////////////////////////////////////////
 
             // Generate points as queries.
-            for (int i = 0; i < n_queries; ++i) {
-                queries[i] = distrL(eng);
+            // for (int i = 0; i < n_queries; ++i) {
+            //     queries[i] = distrL(eng);
+            // }
+
+            for (int i = 0, j = 0; i + 2 <= n_queries; i += 2, ++j) {
+                queries[i+0] = query_min_range + j;
+                queries[i+1] = query_min_range + j + 101;
             }
 
             if (sort_query_intervals) {
                 std::cerr << "Sorting queries..." << std::endl;
-                std::sort(&queries[0], &queries[n_queries - 1]);
+                std::sort(&queries[0], &queries[n_queries]);
             }
 
             // for (int i = 0; i < n_queries; ++i) {
