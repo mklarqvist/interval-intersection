@@ -12,14 +12,10 @@
 /*
 interval ideas:
 * Partition interval set S into ceil(max(S)/M)+1 bins. 
-* Set bits in bitmap to true if ANY value overlaps that range
+* Set bits in bitmap to true if ANY value overlaps that range (A,B)
 * Possibly duplicate values that overlap multiple bins.
 * Perform overlap test in bins.
 * Stop if any bin has a matching value.
-
-if left hand is sorted:
-* keep pointer to previous hit
-* single check to see if the current position still overlap
 */
 
 #include <bitset>
@@ -153,16 +149,7 @@ bool overlap_scalar_nosimd(const uint32_t query, const ssize_t n, const interval
     //#pragma clang loop vectorize(disable)
     for (int i = 0; i < n; ++i) {
         overlaps += (query < ranges[i].right && query > ranges[i].left);
-#if DEBUG == 1
-        if ((query < ranges[i].right && query > ranges[i].left)) {
-            std::cout << query << " overlaps with: " << ranges[i] << "," << ranges[i+1] << std::endl;
-        }
-#endif
     }
-
-#if DEBUG == 1
-    std::cout << "scalar=" << overlaps << std::endl;
-#endif
     return overlaps;
 }
 
@@ -196,17 +183,15 @@ bool overlap_scalar_break(const uint32_t query, const ssize_t n, const interval*
 }
 
 bool overlap_simd(const uint32_t query, const ssize_t n, const interval* ranges) {
-    //uint32_t n_cycles = 2*n / (sizeof(__m128i)/sizeof(uint32_t));
-    //__m128i* vec = (__m128i*)(ranges);
     const __m128i q = _mm_set1_epi32(query);
     const __m128i one_mask = _mm_set1_epi32(1);
     __m128i counters = _mm_set1_epi32(0);
     const uint32_t* r = (const uint32_t*)ranges;
 
-    uint32_t tot = 0;
+    uint64_t tot = 0;
     int i = 0;
     for (; i + 4 <= 2*n; i += 4) {
-        __m128i v0 = _mm_lddqu_si128((__m128i*)r + i);
+        __m128i v0 = _mm_lddqu_si128((__m128i*)(r + i));
         __m128i lt = _mm_cmplt_epi32(q, v0);
         __m128i gt = _mm_cmpgt_epi32(q, v0);
         __m128i shuffle1 = _mm_srli_epi64(lt, 32);
@@ -225,25 +210,59 @@ bool overlap_simd(const uint32_t query, const ssize_t n, const interval* ranges)
 }
 
 bool overlap_simd_add(const uint32_t query, const ssize_t n, const interval* ranges) {
-    uint32_t n_cycles = 2*n / (sizeof(__m128i)/sizeof(uint32_t));
+    //uint32_t n_cycles = 2*n / (sizeof(__m128i)/sizeof(uint32_t));
     //__m128i* vec = (__m128i*)(ranges);
     __m128i q = _mm_set1_epi32(query);
-    __m128i add = _mm_set1_epi32(0);
-    const __m128i one_mask = _mm_set1_epi32(1);
+    //__m128i add = _mm_set1_epi32(0);
+    //const __m128i one_mask = _mm_set1_epi32(1);
+    const uint32_t* r = (const uint32_t*)ranges;
 
-    uint32_t tot = 0;
-    for (int i = 0; i < n_cycles; ++i) {
-        __m128i v0 = _mm_lddqu_si128((__m128i*)ranges + i + 0);
+    uint64_t tot = 0;
+    ssize_t i = 0;
+    for (; i + 4 <= 2*n; i += 4) {
+        __m128i v0 = _mm_lddqu_si128((__m128i*)(r + i + 0));
         __m128i lt = _mm_cmplt_epi32(q, v0);
         __m128i gt = _mm_cmpgt_epi32(q, v0);
         __m128i shuffle1 = _mm_srli_epi64(lt, 32);
-        __m128i collapse = _mm_and_si128(shuffle1 & gt, one_mask);
-        add = _mm_add_epi32(add, collapse);
+        //__m128i collapse = _mm_and_si128(shuffle1 & gt, one_mask);
+        tot += _mm_movemask_epi8(shuffle1 & gt);
+        //add = _mm_add_epi32(add, collapse);
     }
 
-    for (int i = 0; i < 4; ++i) tot += _mm_extract_epi32(add, i);
+    //for (int i = 0; i < 4; ++i) tot += _mm_extract_epi32(add, i);
 
-    for (int i = n_cycles*4; i < n; ++i) {
+    i /= 2;
+    for (; i < n; ++i) {
+        tot += (query < ranges[i].right && query > ranges[i].left);
+    }
+
+    return tot;
+}
+
+bool overlap_simd_add_firstmatch(const uint32_t query, const ssize_t n, const interval* ranges, const interval*& hit) {
+    uint32_t n_cycles = 2*n / (sizeof(__m128i)/sizeof(uint32_t));
+    //__m128i* vec = (__m128i*)(ranges);
+    __m128i q = _mm_set1_epi32(query);
+    //__m128i add = _mm_set1_epi32(0);
+    //const __m128i one_mask = _mm_set1_epi32(1);
+    const uint32_t* r = (const uint32_t*)ranges;
+
+    uint64_t tot = 0;
+    ssize_t i = 0;
+    for (; i + 4 <= 2*n; i += 4) {
+        __m128i v0 = _mm_lddqu_si128((__m128i*)(r + i + 0));
+        __m128i lt = _mm_cmplt_epi32(q, v0);
+        __m128i gt = _mm_cmpgt_epi32(q, v0);
+        __m128i shuffle1 = _mm_srli_epi64(lt, 32);
+        //__m128i collapse = _mm_and_si128(shuffle1 & gt, one_mask);
+        //add = _mm_add_epi32(add, collapse);
+        tot += _mm_movemask_epi8(shuffle1 & gt);
+    }
+
+    //for (int i = 0; i < 4; ++i) tot += _mm_extract_epi32(add, i);
+
+    i /= 2;
+    for (; i < n; ++i) {
         tot += (query < ranges[i].right && query > ranges[i].left);
     }
 
@@ -254,10 +273,10 @@ bool overlap_simd_add_unroll2(const uint32_t query, const ssize_t n, const inter
     uint32_t n_cycles = 2*n / (sizeof(__m128i)/sizeof(uint32_t));
     __m128i* vec = (__m128i*)(ranges);
     __m128i q = _mm_set1_epi32(query);
-    __m128i add = _mm_set1_epi32(0);
-    const __m128i one_mask = _mm_set1_epi32(1);
+    //__m128i add = _mm_set1_epi32(0);
+    //const __m128i one_mask = _mm_set1_epi32(1);
 
-    uint32_t tot = 0;
+    uint64_t tot = 0;
     int i = 0;
     for (/**/; i + 2 < n_cycles; i += 2) {
         __m128i v0 = _mm_loadu_si128(vec + i + 0);
@@ -269,12 +288,15 @@ bool overlap_simd_add_unroll2(const uint32_t query, const ssize_t n, const inter
         __m128i gt2 = _mm_cmpgt_epi32(q, v1);
 
         __m128i shuffle1 = _mm_srli_epi64(lt, 32);
-        __m128i collapse = _mm_and_si128(shuffle1 & gt, one_mask);
-        add = _mm_add_epi32(add, collapse);
+        //__m128i collapse = _mm_and_si128(shuffle1 & gt, one_mask);
+        //add = _mm_add_epi32(add, collapse);
+
+        tot += _mm_movemask_epi8(shuffle1 & gt);
 
         __m128i shuffle2 = _mm_srli_epi64(lt2, 32);
-        collapse = _mm_and_si128(shuffle2 & gt2, one_mask);
-        add = _mm_add_epi32(add, collapse);
+        //collapse = _mm_and_si128(shuffle2 & gt2, one_mask);
+        //add = _mm_add_epi32(add, collapse);
+        tot += _mm_movemask_epi8(shuffle2 & gt2);
     }
 
     for (/**/; i < n_cycles; ++i) {
@@ -282,11 +304,12 @@ bool overlap_simd_add_unroll2(const uint32_t query, const ssize_t n, const inter
         __m128i lt = _mm_cmplt_epi32(q, v0);
         __m128i gt = _mm_cmpgt_epi32(q, v0);
         __m128i shuffle1 = _mm_srli_epi64(lt, 32);
-        __m128i collapse = _mm_and_si128(shuffle1 & gt, one_mask);
-        add = _mm_add_epi32(add, collapse);
+        //__m128i collapse = _mm_and_si128(shuffle1 & gt, one_mask);
+        //add = _mm_add_epi32(add, collapse);
+        tot += _mm_movemask_epi8(shuffle1 & gt);
     }
 
-    for (int i = 0; i < 4; ++i) tot += _mm_extract_epi32(add, i);
+    //for (int i = 0; i < 4; ++i) tot += _mm_extract_epi32(add, i);
 
     for (int i = n_cycles*4; i < n; ++i) {
         tot += (query < ranges[i].right && query > ranges[i].left);
@@ -299,10 +322,10 @@ bool overlap_simd_add_unroll4(const uint32_t query, const ssize_t n, const inter
     uint32_t n_cycles = 2*n / (sizeof(__m128i)/sizeof(uint32_t));
     __m128i* vec = (__m128i*)(ranges);
     __m128i q = _mm_set1_epi32(query);
-    __m128i add = _mm_set1_epi32(0);
-    const __m128i one_mask = _mm_set1_epi32(1);
+    //__m128i add = _mm_set1_epi32(0);
+    //const __m128i one_mask = _mm_set1_epi32(1);
 
-    uint32_t tot = 0;
+    uint64_t tot = 0;
     int i = 0;
     for (/**/; i + 4 < n_cycles; i += 4) {
         __m128i v0 = _mm_loadu_si128(vec + i + 0);
@@ -320,20 +343,24 @@ bool overlap_simd_add_unroll4(const uint32_t query, const ssize_t n, const inter
         __m128i gt4 = _mm_cmpgt_epi32(q, v3);
 
         __m128i shuffle1 = _mm_srli_epi64(lt, 32);
-        __m128i collapse = _mm_and_si128(shuffle1 & gt, one_mask);
-        add = _mm_add_epi32(add, collapse);
+        //__m128i collapse = _mm_and_si128(shuffle1 & gt, one_mask);
+        //add = _mm_add_epi32(add, collapse);
+        tot += _mm_movemask_epi8(shuffle1 & gt);
 
         __m128i shuffle2 = _mm_srli_epi64(lt2, 32);
-        collapse = _mm_and_si128(shuffle2 & gt2, one_mask);
-        add = _mm_add_epi32(add, collapse);
+        //collapse = _mm_and_si128(shuffle2 & gt2, one_mask);
+        //add = _mm_add_epi32(add, collapse);
+        tot += _mm_movemask_epi8(shuffle2 & gt2);
 
         __m128i shuffle3 = _mm_srli_epi64(lt3, 32);
-        collapse = _mm_and_si128(shuffle3 & gt3, one_mask);
-        add = _mm_add_epi32(add, collapse);
+        //collapse = _mm_and_si128(shuffle3 & gt3, one_mask);
+        //add = _mm_add_epi32(add, collapse);
+        tot += _mm_movemask_epi8(shuffle3 & gt3);
 
         __m128i shuffle4 = _mm_srli_epi64(lt4, 32);
-        collapse = _mm_and_si128(shuffle4 & gt4, one_mask);
-        add = _mm_add_epi32(add, collapse);
+        //collapse = _mm_and_si128(shuffle4 & gt4, one_mask);
+        //add = _mm_add_epi32(add, collapse);
+        tot += _mm_movemask_epi8(shuffle4 & gt4);
     }
 
     for (/**/; i + 2 < n_cycles; i += 2) {
@@ -346,12 +373,14 @@ bool overlap_simd_add_unroll4(const uint32_t query, const ssize_t n, const inter
         __m128i gt2 = _mm_cmpgt_epi32(q, v1);
 
         __m128i shuffle1 = _mm_srli_epi64(lt, 32);
-        __m128i collapse = _mm_and_si128(shuffle1 & gt, one_mask);
-        add = _mm_add_epi32(add, collapse);
+        //__m128i collapse = _mm_and_si128(shuffle1 & gt, one_mask);
+        //add = _mm_add_epi32(add, collapse);
+        tot += _mm_movemask_epi8(shuffle1 & gt);
 
         __m128i shuffle2 = _mm_srli_epi64(lt2, 32);
-        collapse = _mm_and_si128(shuffle2 & gt2, one_mask);
-        add = _mm_add_epi32(add, collapse);
+        //collapse = _mm_and_si128(shuffle2 & gt2, one_mask);
+        //add = _mm_add_epi32(add, collapse);
+        tot += _mm_movemask_epi8(shuffle2 & gt2);
     }
 
     for (/**/; i < n_cycles; ++i) {
@@ -359,11 +388,12 @@ bool overlap_simd_add_unroll4(const uint32_t query, const ssize_t n, const inter
         __m128i lt = _mm_cmplt_epi32(q, v0);
         __m128i gt = _mm_cmpgt_epi32(q, v0);
         __m128i shuffle1 = _mm_srli_epi64(lt, 32);
-        __m128i collapse = _mm_and_si128(shuffle1 & gt, one_mask);
-        add = _mm_add_epi32(add, collapse);
+        //__m128i collapse = _mm_and_si128(shuffle1 & gt, one_mask);
+        //add = _mm_add_epi32(add, collapse);
+        tot += _mm_movemask_epi8(shuffle1 & gt);
     }
 
-    for (int i = 0; i < 4; ++i) tot += _mm_extract_epi32(add, i);
+    //or (int i = 0; i < 4; ++i) tot += _mm_extract_epi32(add, i);
 
     for (int i = n_cycles*4; i < n; ++i) {
         tot += (query < ranges[i].right && query > ranges[i].left);
@@ -377,21 +407,29 @@ bool overlap_avx2(const uint32_t query, const ssize_t n, const interval* ranges)
     if (n < 16)
         return overlap_scalar(query, n, ranges);
 
-    uint32_t n_cycles = 2*n / (sizeof(__m256i)/sizeof(uint32_t));
-    __m256i* vec = (__m256i*)(ranges);
+    //uint32_t n_cycles = 2*n / (sizeof(__m128i)/sizeof(uint32_t));
+    //__m128i* vec = (__m128i*)(ranges);
     __m256i q = _mm256_set1_epi32(query);
+    //__m128i add = _mm_set1_epi32(0);
+    //const __m128i one_mask = _mm_set1_epi32(1);
+    const uint32_t* r = (const uint32_t*)ranges;
 
-    uint32_t tot = 0;
-    for (int i = 0; i < n_cycles; ++i) {
-        __m256i v0 = _mm256_loadu_si256(vec + i + 0);
-        __m256i lt = _mm256_cmpgt_epi32(v0, q); // hack for missing cmplt
-        __m256i gt = _mm256_cmpgt_epi32(q, vec[i]);
-        __m256i shuffle1 = _mm256_shuffle_epi32(lt, _MM_SHUFFLE(2,3,0,1));
-        __m256i collapse = _mm256_and_si256(shuffle1, gt);
-        PIL_POPCOUNT_AVX2(tot, collapse);
+    uint64_t tot = 0;
+    ssize_t i = 0;
+    for (; i + 8 <= 2*n; i += 8) {
+        __m256i v0 = _mm256_lddqu_si256((__m256i*)(r + i + 0));
+        __m256i lt = _mm256_cmpgt_epi32(v0, q); // hack for not having less than
+        __m256i gt = _mm256_cmpgt_epi32(q, v0);
+        __m256i shuffle1 = _mm256_srli_epi64(lt, 32);
+        //__m128i collapse = _mm_and_si128(shuffle1 & gt, one_mask);
+        //add = _mm_add_epi32(add, collapse);
+        tot += _mm256_movemask_epi8(shuffle1 & gt);
     }
-    
-    for (int i = n_cycles*8; i < n; ++i) {
+
+    //for (int i = 0; i < 4; ++i) tot += _mm_extract_epi32(add, i);
+
+    i /= 2;
+    for (; i < n; ++i) {
         tot += (query < ranges[i].right && query > ranges[i].left);
     }
 
@@ -468,7 +506,7 @@ bool overlap_simd_add_binary(const uint32_t query, const ssize_t n, const interv
         if(to - from <= 32) break; // region is small
     }
 
-    uint32_t tot = 0;
+    uint64_t tot = 0;
     uint32_t target_range = to - from + 1;
     uint32_t n_cycles = 2*target_range / (sizeof(__m128i)/sizeof(uint32_t));
     __m128i* vec = (__m128i*)(&ranges[from]);
@@ -520,18 +558,9 @@ bool overlap_scalar_binary_skipsquash(const uint32_t query, const ssize_t n_rang
     if (query < d.front().left)  return false; // if first interval [A,B] start after the query then never overlap
     if (query > d.back().right)  return false; // if the query starts after the last interval then never overlap
 
-    if (1) {
-        return overlap_simd(query, d.size(), &d[0]);
-
-        // for (int i = 0; i < d.size(); ++i) {
-        //     overlaps += (query < d[i].right && query > d[i].left);
-        // }
-        //const uint32_t cycle_range = (to - from + 1);
-       
-
-        // return overlaps;
+    if (d.size() < 32) {
+        return overlap_avx2(query, d.size(), &d[0]);
     } else {
-        std::cerr << "never" << std::endl;
         // Binary search
         uint32_t from = 0, to = d.size() - 1, mid = 0;
         while (true) {
@@ -546,7 +575,7 @@ bool overlap_scalar_binary_skipsquash(const uint32_t query, const ssize_t n_rang
             if(to - from <= 32) break; // region is small
         }
 
-        return overlap_simd_add(query, to - from + 1, &d[from]);
+        return overlap_avx2(query, to - from + 1, &d[from]);
     }
 }
 
@@ -584,6 +613,55 @@ bool overlap_scalar_binary_firstmatch(const uint32_t query, const ssize_t n, con
     }
 
     return false;
+}
+
+bool overlap_scalar_binary_skipsquash(const uint32_t query, const ssize_t n_ranges, 
+                                      const interval* ranges, const uint64_t* bitmaps, 
+                                      const uint32_t n_bitmaps, const uint32_t bin_size, 
+                                      const std::vector<bitmap_helper>& bitmap_data,
+                                      const interval*& hit) 
+{
+    if (n_ranges == 0) return false;
+
+    if (n_ranges < 4) {
+        return overlap_scalar_first_match(query, n_ranges, ranges, hit);
+    }
+
+    if (query < ranges[0].left) return false; // if first interval [A,B] start after the query then never overlap
+    if (query > ranges[n_ranges-1].right) return false; // if the query starts after the last interval then never overlap
+
+    const uint32_t target_bin = query / bin_size; // single position / bin_size
+
+    if ((bitmaps[target_bin / 64] & (1ULL << (target_bin % 64))) == 0)
+        return false; // squash
+
+    uint32_t overlaps = 0;
+    const std::vector<interval>& d = bitmap_data[target_bin].intervals;
+    if (query < d.front().left)  return false; // if first interval [A,B] start after the query then never overlap
+    if (query > d.back().right)  return false; // if the query starts after the last interval then never overlap
+
+    if (d.size() < 32) {
+        return overlap_scalar_first_match(query, d.size(), &d[0], hit);
+    } else {
+        // Binary search
+        uint32_t from = 0, to = d.size() - 1, mid = 0;
+        while (true) {
+            mid = (to + from) / 2;
+            __builtin_prefetch(&d[(mid + 1 + to) / 2],   0, 1);
+            __builtin_prefetch(&d[(from + mid - 1) / 2], 0, 1);
+
+            if(d[mid].right <= query) from = mid + 1;
+            else if(d[mid].left >= query) to = mid - 1;
+            else {
+                hit = &d[mid];
+                return true;
+            }
+
+            if(to - from <= 32) break; // region is small
+        }
+
+        return overlap_scalar_first_match(query, to - from + 1, &d[from], hit);
+    }
 }
 
 // Definition for microsecond timer.
@@ -719,23 +797,60 @@ uint64_t wrapper_listsquash(overlap_func_squash f,
                             uint64_t* bitmaps, const uint32_t n_bitmaps, 
                             const uint32_t bin_size, 
                             const std::vector<bitmap_helper>& bitmap_data,
-                            uint64_t& timing) 
+                            uint64_t& timing, bool is_sorted) 
 {
-    // Start timer.
-    clockdef t1 = hclock::now();
-
     uint64_t n_overlaps = 0;
-    for (int i = 0; i < n_queries; ++i) {
-        n_overlaps += (*f)(queries[i], n_ranges, ranges, bitmaps, n_bitmaps, bin_size, bitmap_data);
+
+    if (is_sorted == false) {
+        // Start timer.
+        clockdef t1 = hclock::now();
+        
+        for (int i = 0; i < n_queries; ++i) {
+            n_overlaps += (*f)(queries[i], n_ranges, ranges, bitmaps, n_bitmaps, bin_size, bitmap_data);
+        }
+
+        // End timer and update times.
+        clockdef t2 = hclock::now();
+        auto time_span = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1);
+        timing = time_span.count();
+
+        // queries / second
+        std::cerr << time_span.count() << " " << (uint64_t)((double)n_queries/time_span.count()*1e6) << std::endl;
+    } else {
+        const interval* prev = nullptr;
+        bool found = false;
+
+        // Start timer.
+        clockdef t1 = hclock::now();
+
+        uint64_t n_a = 0, n_b = 0;
+        for (int i = 0; i < n_queries; ++i) {
+            if (found) {
+                assert(prev != nullptr);
+
+                if ((queries[i] < prev->right && queries[i] > prev->left)) {
+                    ++n_overlaps;
+                    ++n_a;
+                } else {
+                    found = overlap_scalar_binary_skipsquash(queries[i], n_ranges, ranges, bitmaps, n_bitmaps, bin_size, bitmap_data, prev); // todo pass reference to prev and update if found
+                    n_overlaps += found;
+                    ++n_b;
+                }
+            } else { // no previous
+                found = overlap_scalar_binary_skipsquash(queries[i], n_ranges, ranges, bitmaps, n_bitmaps, bin_size, bitmap_data, prev);
+                n_overlaps += found;
+                ++n_b;
+            }
+        }
+
+        // End timer and update times.
+        clockdef t2 = hclock::now();
+        auto time_span = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1);
+        timing = time_span.count();
+
+        // queries / second
+        std::cerr << time_span.count() << " " << (uint64_t)((double)n_queries/time_span.count()*1e6) << std::endl;
     }
-
-    // End timer and update times.
-    clockdef t2 = hclock::now();
-    auto time_span = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1);
-    timing = time_span.count();
-
-    // queries / second
-    std::cerr << time_span.count() << " " << (uint64_t)((double)n_queries/time_span.count()*1e6) << std::endl;
 
     return n_overlaps;
 }
@@ -789,13 +904,13 @@ bool bench() {
     // 233,785 exons and 207,344 introns from 20,246 annotated genes (hg38)
     
     //std::vector<uint32_t> n_ranges = {8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,524288,1048576,2097152,4194304,8388608,16777216,33554432,67108864,134217728,268435456};
-    std::vector<uint32_t> n_ranges = {64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,524288,1048576,2097152,4194304,8388608,16777216,33554432,67108864,134217728,268435456};
+    std::vector<uint32_t> n_ranges = {2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,524288,1048576,2097152,4194304,8388608,16777216,33554432,67108864,134217728,268435456};
     
     bool sort_query_intervals = true; // set to true to check performance of both sets being sorted
     uint32_t interval_min_range = 0, interval_max_range = 250e6; // chromosome 1 is 249Mb
     uint32_t query_min_range = 40e6, query_max_range = 140e6;
     uint32_t n_queries = 10e6;
-    uint32_t n_repeats = 5;
+    uint32_t n_repeats = 10;
 
     std::cerr << "Queries=" << n_queries << std::endl;
 
@@ -825,6 +940,7 @@ bool bench() {
             // SIMD methods require that the ranges are sorted.
             std::sort(ranges, &ranges[n_ranges[r]]);
 
+            std::cerr << "a" << std::endl;
             for (int i = 0, j = 0; i + 2 <= n_ranges[r]; i += 2, ++j) {
                 ivals[j].left  = ranges[i+0];
                 ivals[j].right = ranges[i+1];
@@ -832,7 +948,9 @@ bool bench() {
 
             ///////////////////////////////////////////////////////////////
             // Max value is back
+            std::cerr << "b" << std::endl;
             uint32_t n_bins = std::min(n_ranges[r], std::min((uint32_t)n_ranges[r]/8, (uint32_t)131072)); // choose this such that no more than 50% of bits are ever set
+            if (n_bins == 0) n_bins = n_ranges[r];
             uint32_t step_size = ranges[n_ranges[r]-1] / n_bins + 1;
             std::cerr << "max=" << ranges[n_ranges[r]-1] << " -> " << n_bins << "," << step_size << std::endl;
             
@@ -845,7 +963,7 @@ bool bench() {
             // Map interval to segments and update segmental bitmap.
             for (int i = 0; i < n_ranges_pairs; ++i) {
                 uint32_t from = ivals[i].left / step_size;
-                uint32_t to   = ivals[i].right / step_size;
+                uint32_t to   = ivals[i].right / step_size + 1;
                 for (int k = from; k <= to; ++k) {
                     // Set bit for segment.
                     bitmaps[k / 64] |= 1ULL << (k % 64);
@@ -888,6 +1006,7 @@ bool bench() {
                 uint64_t n_scalar_nosimd = wrapper(&overlap_scalar_nosimd, n_queries, queries, n_ranges_pairs, ivals, timings[0]);
                 uint64_t n_scalar = wrapper(&overlap_scalar, n_queries, queries, n_ranges_pairs, ivals, timings[1]);
                 uint64_t n_scalar_break = wrapper(&overlap_scalar_break, n_queries, queries, n_ranges_pairs, ivals, timings[2]);
+
 #if SIMD_VERSION >= 5
                 uint64_t n_avx2 = wrapper(&overlap_avx2, n_queries, queries, n_ranges_pairs, ivals, timings[4]);
 #else
@@ -908,7 +1027,7 @@ bool bench() {
             }
             
             uint64_t n_binary = wrapper(&overlap_scalar_binary, n_queries, queries, n_ranges_pairs, ivals, timings[8]);
-            
+
             //uint64_t n_simd_binary = wrapper(&overlap_simd_add_binary, n_queries, queries, n_ranges_pairs, ivals, timings[9]);
             uint64_t n_simd_binary = 0;
             uint64_t n_ekg_tree = wrapper_tree(n_queries, queries, n_ranges_pairs, ivals, timings[10]);
@@ -921,11 +1040,19 @@ bool bench() {
                                                    n_ranges_pairs, ivals, 
                                                    bitmaps, bitmaps_pointers.size(), 
                                                    step_size, bitmaps_pointers, 
-                                                   timings[11]);
+                                                   timings[11], false);
+
+            uint64_t n_sq_sorted = wrapper_listsquash(&overlap_scalar_binary_skipsquash, 
+                                                   n_queries, queries, 
+                                                   n_ranges_pairs, ivals, 
+                                                   bitmaps, bitmaps_pointers.size(), 
+                                                   step_size, bitmaps_pointers, 
+                                                   timings[14], true);
             
-            std::cerr << "squash=" << n_squash << std::endl;
+            std::cerr << "squash=" << n_squash << " squash_sorted=" << n_sq_sorted << std::endl;
 
             assert(n_squash == n_binary);
+            assert(n_sq_sorted == n_binary);
 
             uint64_t n_simd_sorted = 0;
             if (n_ranges[r] <= 1024) {
@@ -940,8 +1067,8 @@ bool bench() {
             
 
             // Print output in nanoseconds.
-            std::cout << n_ranges_pairs << "\t" << n_queries << "\t" << c;
-            for (int i = 0; i < 14; ++i) {
+            std::cout << n_ranges_pairs << "\t" << n_queries << "\t" << c << "\t" << (float)n_squash/n_queries;
+            for (int i = 0; i < 15; ++i) {
                 std::cout << "\t" << (double)timings[i]/n_queries*1000.0;
             }
             std::cout << std::endl;
