@@ -1015,14 +1015,14 @@ bool bench() {
             ///////////////////////////////////////////////////////////////
 
             // Generate points as queries.
-            // for (int i = 0; i < n_queries; ++i) {
-            //     queries[i] = distrL(eng);
-            // }
-
-            for (int i = 0, j = 0; i + 2 <= n_queries; i += 2, ++j) {
-                queries[i+0] = query_min_range + j;
-                queries[i+1] = query_min_range + j + 101;
+            for (int i = 0; i < n_queries; ++i) {
+                queries[i] = distrL(eng);
             }
+
+            // for (int i = 0, j = 0; i + 2 <= n_queries; i += 2, ++j) {
+            //     queries[i+0] = query_min_range + j;
+            //     queries[i+1] = query_min_range + j + 101;
+            // }
 
             if (sort_query_intervals) {
                 std::cerr << "Sorting queries..." << std::endl;
@@ -1084,17 +1084,24 @@ bool bench() {
                                                    step_size, bitmaps_pointers, 
                                                    timings[11], false);
 
-            uint64_t n_sq_sorted = wrapper_listsquash(&overlap_scalar_binary_skipsquash, 
-                                                   n_queries, queries, 
-                                                   n_ranges_pairs, ivals, 
-                                                   bitmaps, bitmaps_pointers.size(), 
-                                                   step_size, bitmaps_pointers, 
-                                                   timings[14], true);
-            
+            uint64_t n_sq_sorted = 0;
+            if (sort_query_intervals) {
+                n_sq_sorted = wrapper_listsquash(&overlap_scalar_binary_skipsquash, 
+                                                    n_queries, queries, 
+                                                    n_ranges_pairs, ivals, 
+                                                    bitmaps, bitmaps_pointers.size(), 
+                                                    step_size, bitmaps_pointers, 
+                                                    timings[14], true);
+
+                assert(n_sq_sorted == n_binary);
+            } else {
+                n_sq_sorted = 0;
+            }
+
             std::cerr << "squash=" << n_squash << " squash_sorted=" << n_sq_sorted << std::endl;
 
             assert(n_squash == n_binary);
-            assert(n_sq_sorted == n_binary);
+            
 
             uint64_t n_simd_sorted = 0;
             if (n_ranges[r] <= 1024) {
