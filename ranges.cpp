@@ -8,7 +8,7 @@
 #include <vector> //vector
 
 #include "IntervalTree.h"
-#include "ivan_intervaltree.hpp"
+// #include "ivan_intervaltree.hpp"
 
 /*
 interval ideas:
@@ -1118,7 +1118,8 @@ bool bench() {
             // Print output in nanoseconds.
             std::cout << n_ranges_pairs << "\t" << n_queries << "\t" << c << "\t" << (float)n_squash/n_queries;
             for (int i = 0; i < 15; ++i) {
-                std::cout << "\t" << (double)timings[i]/n_queries*1000.0;
+                // std::cout << "\t" << (double)timings[i]/n_queries*1000.0;
+                std::cout << "\t" << ((double)n_queries*1e3)/(timings[i]);
             }
             std::cout << std::endl;
         
